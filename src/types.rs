@@ -1,14 +1,17 @@
-use std::io::{Read, Write};
+use tokio::io::{AsyncRead, AsyncWrite};
 
-pub trait McRead {
+pub(crate) trait McRead {
     type Error;
-    fn read_stream<T: Read>(stream: &mut T) -> Result<Self, Self::Error>
+    async fn read_stream<T: AsyncRead + Unpin>(stream: &mut T) -> Result<Self, Self::Error>
     where
         Self: Sized;
 }
-pub trait McWrite {
+pub(crate) trait McWrite {
     type Error;
-    fn write_stream<T: Write>(&self, stream: &mut T) -> Result<usize, Self::Error>
+    async fn write_stream<T: AsyncWrite + Unpin>(
+        &self,
+        stream: &mut T,
+    ) -> Result<usize, Self::Error>
     where
         Self: Sized;
 }

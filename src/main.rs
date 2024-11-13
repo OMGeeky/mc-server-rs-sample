@@ -2,47 +2,34 @@ pub mod protocols;
 pub mod types;
 pub mod utils;
 
-use crate::protocols::handle;
 use crate::types::string::McString;
 use crate::types::var_int::VarInt;
 use crate::types::{McRead, McRustRepr};
 use crate::utils::RWStreamWithLimit;
 use num_derive::FromPrimitive;
 use num_traits::{FromPrimitive, ToPrimitive};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread;
-use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::net::TcpStream;
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), ()> {
     println!("Hello, world!");
-    let listener = TcpListener::bind("127.0.0.1:25565").unwrap();
+    // let listener = TcpListener::bind("127.0.0.1:25565").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:25565")
+        .await
+        .unwrap();
     println!("Listening started.");
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                thread::spawn(|| {
-                    println!("===============START=====================");
+    loop {
+        let (stream, socket) = listener.accept().await.map_err(|x| {
+            dbg!(x);
+        })?;
 
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(3)))
-                        .unwrap();
-                    stream
-                        .set_write_timeout(Some(Duration::from_secs(3)))
-                        .unwrap();
-                    println!(
-                        "Timeout for connection: {:?}/{:?}",
-                        stream.read_timeout(),
-                        stream.write_timeout()
-                    );
-                    handle_connection(stream);
-                    println!("===============DONE======================");
-                });
-            }
-            Err(err) => {
-                dbg!(err);
-            }
-        }
+        tokio::spawn(async move {
+            println!("===============START=====================");
+            dbg!(&socket);
+            handle_connection(stream).await;
+            println!("===============DONE======================");
+        });
     }
 }
 #[derive(FromPrimitive, Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -59,12 +46,11 @@ struct Connection {
     compression_active: bool,
 }
 impl Connection {
-    fn handle(&mut self) -> Result<(), String> {
+    async fn handle(&mut self) -> Result<(), String> {
         while self.connection_state != ConnectionState::Closed {
-            let x = self.tcp_stream.peek(&mut [0]); //see if we have at least one byte available
+            let x = self.tcp_stream.peek(&mut [0]).await; //see if we have at least one byte available
             match x {
                 Ok(size) => {
-                    println!("we should have 1 here: {size}");
                     if size == 0 {
                         println!("Reached end of stream.");
                         self.connection_state = ConnectionState::Closed;
@@ -76,7 +62,7 @@ impl Connection {
                 }
             }
 
-            let length = VarInt::read_stream(&mut self.tcp_stream)?;
+            let length = VarInt::read_stream(&mut self.tcp_stream).await?;
             println!("packet length: {}", length.as_rs());
             let bytes_left_in_package = length.to_rs();
 
@@ -88,7 +74,8 @@ impl Connection {
                 &mut package_stream,
                 self.connection_state,
                 self.compression_active,
-            );
+            )
+            .await;
             match result {
                 Ok(new_connection_state) => {
                     assert_eq!(
@@ -99,10 +86,7 @@ impl Connection {
                     self.connection_state = new_connection_state;
                 }
                 Err(e) => {
-                    //discard rest of package for failed ones
-                    discard_read(&mut self.tcp_stream, bytes_left_in_package.to_u8().unwrap())
-                        .map_err(|x| x.to_string())?;
-
+                    self.connection_state = ConnectionState::Closed;
                     println!("Got an error during package handling: {e}");
                 }
             }
@@ -110,26 +94,21 @@ impl Connection {
 
         Ok(())
     }
-    fn handshake<T: Read + Write>(
+    async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
         stream: &mut T,
         _compression: bool,
         // bytes_left_in_package: &mut i32,
     ) -> Result<ConnectionState, String> {
-        // println!("bytes left:{}", bytes_left_in_package);
-        let protocol_version = VarInt::read_stream(stream)?;
-        // *bytes_left_in_package -= read as i32;
+        println!("Handshake");
+        let protocol_version = VarInt::read_stream(stream).await?;
         println!("protocol version: {}", protocol_version.as_rs());
-        // println!("bytes left:{}", bytes_left_in_package);
-        let address =
-            McString::read_stream(stream).map_err(|_| "Could not read string".to_string())?;
-        // *bytes_left_in_package -= read as i32;
+        let address: McString<255> = McString::read_stream(stream)
+            .await
+            .map_err(|_| "Could not read string".to_string())?;
         println!("address: '{}'", address.as_rs());
-        stream.read_exact(&mut [0, 2]).unwrap(); //server port. Unused
-                                                 // *bytes_left_in_package -= 2;
-        let next_state_id = VarInt::read_stream(stream)?;
-        // *bytes_left_in_package -= read as i32;
+        stream.read_exact(&mut [0, 2]).await.unwrap(); //server port. Unused
+        let next_state_id = VarInt::read_stream(stream).await?;
         println!("next state: {}", next_state_id.as_rs());
-        // println!("bytes left:{}", bytes_left_in_package);
         let next_state = FromPrimitive::from_i32(next_state_id.to_rs());
         match next_state {
             Some(next_state) => Ok(next_state),
@@ -139,42 +118,36 @@ impl Connection {
             )),
         }
     }
-    fn handle_package<T: Read + Write>(
-        stream: &mut RWStreamWithLimit<T>,
+    async fn handle_package<T: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut RWStreamWithLimit<'_, T>,
         connection_state: ConnectionState,
         compression: bool,
-        // bytes_left_in_package: usize,
     ) -> Result<ConnectionState, String> {
-        // let mut stream = RWStreamWithLimit::new(stream, bytes_left_in_package);
-        // let stream = &mut stream;
-        let packet_id = VarInt::read_stream(stream)?;
-        // *bytes_left_in_package = i32::max(*bytes_left_in_package - read as i32, 0);
+        let packet_id = VarInt::read_stream(stream).await?;
 
         println!("id: {:0>2x}", packet_id.as_rs());
         if connection_state == ConnectionState::NotConnected && packet_id.to_rs() == 0x00 {
-            return Self::handshake(stream, compression);
+            return Self::handshake(stream, compression).await;
         }
         match FromPrimitive::from_i32(packet_id.to_rs()) {
             Some(protocol) => {
-                // println!("bytes left:{}", bytes_left_in_package);
-                let res = handle(protocol, stream);
-                // println!("bytes left:{}", bytes_left_in_package);
+                let res = protocols::handle(protocol, stream).await;
                 match res {
                     Ok(_) => {
-                        // println!("bytes left:{}", bytes_left_in_package);
                         println!("Success!");
                     }
-                    Err(_) => {
-                        stream.discard_unread().map_err(|x| x.to_string())?;
-                        // println!("bytes left:{}", bytes_left_in_package);
-                        // *bytes_left_in_package -= discard_read(stream, *bytes_left_in_package as u8)
-                        //     as i32;
+                    Err(terminate_connection) => {
+                        if terminate_connection {
+                            return Err("Something terrible has happened!".to_string());
+                        } else {
+                            stream.discard_unread().await.map_err(|x| x.to_string())?;
+                        }
                         println!("Failure :(");
                     }
                 }
             }
             None => {
-                stream.discard_unread().map_err(|x| x.to_string())?;
+                stream.discard_unread().await.map_err(|x| x.to_string())?;
                 // *bytes_left_in_package -= discard_read(stream, *bytes_left_in_package as u8)
                 //     .map_err(|x| x.to_string())? as i32;
                 println!("I don't know this protocol yet, so Im gonna ignore it...");
@@ -183,18 +156,14 @@ impl Connection {
         Ok(connection_state)
     }
 }
-fn handle_connection(stream: TcpStream) {
+async fn handle_connection(stream: TcpStream) {
     let mut connection = Connection {
         connection_state: ConnectionState::NotConnected,
         tcp_stream: stream,
         compression_active: false,
     };
-    let result = connection.handle();
+    let result = connection.handle().await;
     if let Err(e) = result {
         dbg!(e);
     }
-}
-fn discard_read<T: Read>(stream: &mut T, bytes: u8) -> Result<usize, std::io::Error> {
-    stream.read_exact(&mut [0, bytes])?;
-    Ok(bytes as usize)
 }

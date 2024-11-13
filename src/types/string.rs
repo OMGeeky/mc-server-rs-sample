@@ -1,58 +1,77 @@
 use crate::types::var_int::VarInt;
 use crate::types::{McRead, McRustRepr, McWrite};
-use std::io::{Read, Write};
 
-pub struct McString(pub String);
-impl McRead for McString {
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+pub struct McString<const MAX_SIZE: usize> {
+    pub value: String,
+}
+impl<const MAX_SIZE: usize> McString<MAX_SIZE> {
+    fn measure_size(s: &str) -> usize {
+        s.len()
+    }
+    pub fn from_string(s: String) -> Self {
+        Self { value: s }
+    }
+}
+impl<const MAX_SIZE: usize> McRead for McString<MAX_SIZE> {
     type Error = ();
 
-    fn read_stream<T: Read>(b: &mut T) -> Result<Self, Self::Error>
+    async fn read_stream<T: AsyncRead + Unpin>(b: &mut T) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
-        let size = VarInt::read_stream(b).map_err(|x| {
+        let max_size = VarInt::read_stream(b).await.map_err(|x| {
             dbg!(x);
         })?;
-        let size = *size as usize;
+        let size = *max_size as usize;
+
+        // Check if the size exceeds the maximum allowed length (n)
+        if size > (MAX_SIZE * 3) + 3 {
+            return Err(()); // Or a more specific error type
+        }
 
         let mut bytes = vec![0u8; size];
-        let actual_size = b.read(&mut bytes).map_err(|x| {
+        let actual_size = b.read(&mut bytes).await.map_err(|x| {
             dbg!(x);
         })?;
         assert_eq!(size, actual_size);
         let value = String::from_utf8(bytes).map_err(|x| {
             dbg!(x);
         })?;
-        Ok(Self(value))
+        Ok(Self { value })
     }
 }
-impl McWrite for McString {
+impl<const MAX_SIZE: usize> McWrite for McString<MAX_SIZE> {
     type Error = std::io::Error;
 
-    fn write_stream<T: Write>(&self, stream: &mut T) -> Result<usize, Self::Error>
+    async fn write_stream<T: AsyncWrite + Unpin>(
+        &self,
+        stream: &mut T,
+    ) -> Result<usize, Self::Error>
     where
         Self: Sized,
     {
-        let buf = self.0.as_bytes();
-        let length = buf.len(); //This does not actually count right (see https://wiki.vg/Protocol#Type:String)
-        VarInt(length as i32).write_stream(stream)?;
+        let buf = self.value.as_bytes();
+        let length = Self::measure_size(&self.value);
+        VarInt(length as i32).write_stream(stream).await?;
 
-        stream.write_all(buf)?;
+        stream.write_all(buf).await?;
         Ok(length)
     }
 }
-impl McRustRepr for McString {
+impl<const MAX_SIZE: usize> McRustRepr for McString<MAX_SIZE> {
     type RustRepresentation = String;
 
     fn into_rs(self) -> Self::RustRepresentation {
-        self.0
+        self.value
     }
 
     fn to_rs(&self) -> Self::RustRepresentation {
-        self.0.to_owned()
+        self.value.to_owned()
     }
 
     fn as_rs(&self) -> &Self::RustRepresentation {
-        &self.0
+        &self.value
     }
 }
