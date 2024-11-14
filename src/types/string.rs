@@ -7,8 +7,17 @@ pub struct McString<const MAX_SIZE: usize> {
     pub value: String,
 }
 impl<const MAX_SIZE: usize> McString<MAX_SIZE> {
-    fn measure_size(s: &str) -> usize {
-        s.len()
+    pub fn measure_size(s: &str) -> usize {
+        // 3. UTF-8 encoded byte length
+        let utf8_len = s.bytes().len();
+
+        // 5. Calculate total length (including VarInt prefix)
+        let varint_size = VarInt(utf8_len as i32).get_size();
+        if varint_size > 3 {
+            //TODO: This is not allowed
+        }
+        // println!("strlen: {}+({}?{})", varint_size, utf8_len, utf16_len);
+        varint_size + utf8_len
     }
     pub fn from_string(s: String) -> Self {
         Self { value: s }
@@ -25,6 +34,7 @@ impl<const MAX_SIZE: usize> McRead for McString<MAX_SIZE> {
             dbg!(x);
         })?;
         let size = *max_size as usize;
+        println!("Reading string of length: {}", size);
 
         // Check if the size exceeds the maximum allowed length (n)
         if size > (MAX_SIZE * 3) + 3 {
@@ -35,10 +45,14 @@ impl<const MAX_SIZE: usize> McRead for McString<MAX_SIZE> {
         let actual_size = b.read(&mut bytes).await.map_err(|x| {
             dbg!(x);
         })?;
-        assert_eq!(size, actual_size);
         let value = String::from_utf8(bytes).map_err(|x| {
             dbg!(x);
         })?;
+        assert_eq!(
+            size, actual_size,
+            "Did not read all that was to read {}",
+            value
+        );
         Ok(Self { value })
     }
 }
@@ -54,10 +68,12 @@ impl<const MAX_SIZE: usize> McWrite for McString<MAX_SIZE> {
     {
         let buf = self.value.as_bytes();
         let length = Self::measure_size(&self.value);
-        VarInt(length as i32).write_stream(stream).await?;
-
+        println!("string length: {}", length);
+        let length_var_int = VarInt(length as i32);
+        let written = length_var_int.write_stream(stream).await?;
+        println!("Writing String to stream: '{}'", self.value);
         stream.write_all(buf).await?;
-        Ok(length)
+        Ok(buf.len() + written)
     }
 }
 impl<const MAX_SIZE: usize> McRustRepr for McString<MAX_SIZE> {

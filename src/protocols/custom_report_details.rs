@@ -1,3 +1,4 @@
+use crate::types::string::McString;
 use crate::types::var_int::VarInt;
 use crate::types::McRead;
 use crate::utils::RWStreamWithLimit;
@@ -10,33 +11,22 @@ impl Protocol {
         stream: &mut RWStreamWithLimit<'_, T>,
         // bytes_left_in_package: &mut i32,
     ) -> Result<(), bool> {
+        println!("Some custom report detail stuff...");
         let count = VarInt::read_stream(stream).await.map_err(|x| {
             dbg!(x);
             true
         })?;
         dbg!(&count);
-        let string_size = VarInt::read_stream(stream).await.map_err(|x| {
-            dbg!(x);
-            true
-        })?;
-        dbg!(&string_size);
-        stream.discard_unread().await.map_err(|x| {
-            dbg!(x);
-            true
-        })?;
-        // for i in 0..*count {
-        //     let title = McString::read_stream(stream).await.map_err(|x| {
-        //         dbg!(x);
-        //     })?;
-        //     let description = McString::read_stream(stream).await.map_err(|x| {
-        //         dbg!(x);
-        //     })?;
-        //     println!(
-        //         "Read title & description fo some custom report ({i}): {}\n{}",
-        //         title.as_rs(),
-        //         description.as_rs()
-        //     );
-        // }
-        Ok(())
+        for i in 0..*count {
+            McString::<128>::read_stream(stream).await.map_err(|x| {
+                dbg!(x);
+                true
+            })?;
+            McString::<4096>::read_stream(stream).await.map_err(|x| {
+                dbg!(x);
+                true
+            })?;
+        }
+        Err(true)
     }
 }

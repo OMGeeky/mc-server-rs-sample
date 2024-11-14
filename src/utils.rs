@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::io::ErrorKind;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -6,6 +7,23 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 pub struct RWStreamWithLimit<'a, T: AsyncRead + AsyncWrite> {
     stream: &'a mut T,
     read_bytes_left: usize,
+}
+
+impl<'a, T: AsyncRead + AsyncWrite + Unpin> RWStreamWithLimit<'a, T> {
+    pub(crate) async fn discard(&mut self, bytes: usize) -> std::io::Result<usize> {
+        let bytes = min(bytes, self.read_bytes_left);
+        let read = self.stream.read_exact(&mut vec![0; bytes]).await?;
+        self.read_bytes_left -= read;
+        Ok(read)
+    }
+}
+pub(crate) trait MyAsyncReadExt {
+    async fn discard(&mut self, bytes: usize) -> std::io::Result<usize>;
+}
+impl<T: AsyncRead + Unpin> MyAsyncReadExt for T {
+    async fn discard(&mut self, bytes: usize) -> std::io::Result<usize> {
+        self.read_exact(&mut vec![0; bytes]).await
+    }
 }
 
 impl<'a, T: AsyncRead + AsyncWrite + Unpin> RWStreamWithLimit<'a, T> {

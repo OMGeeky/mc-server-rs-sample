@@ -1,3 +1,4 @@
+#![allow(unused)]
 pub mod protocols;
 pub mod types;
 pub mod utils;
@@ -5,10 +6,10 @@ pub mod utils;
 use crate::types::string::McString;
 use crate::types::var_int::VarInt;
 use crate::types::{McRead, McRustRepr};
-use crate::utils::RWStreamWithLimit;
+use crate::utils::{MyAsyncReadExt, RWStreamWithLimit};
 use num_derive::FromPrimitive;
 use num_traits::{FromPrimitive, ToPrimitive};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[tokio::main]
@@ -38,6 +39,7 @@ enum ConnectionState {
     Status = 1,
     Login = 2,
     Transfer = 3,
+    ///Internal use
     Closed = -1,
 }
 struct Connection {
@@ -87,6 +89,7 @@ impl Connection {
                 }
                 Err(e) => {
                     self.connection_state = ConnectionState::Closed;
+                    dbg!(&self.tcp_stream.shutdown().await);
                     println!("Got an error during package handling: {e}");
                 }
             }
@@ -106,7 +109,7 @@ impl Connection {
             .await
             .map_err(|_| "Could not read string".to_string())?;
         println!("address: '{}'", address.as_rs());
-        stream.read_exact(&mut [0, 2]).await.unwrap(); //server port. Unused
+        stream.discard(2).await.unwrap(); //server port. Unused
         let next_state_id = VarInt::read_stream(stream).await?;
         println!("next state: {}", next_state_id.as_rs());
         let next_state = FromPrimitive::from_i32(next_state_id.to_rs());
