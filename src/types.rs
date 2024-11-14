@@ -23,3 +23,4 @@ pub trait McRustRepr {
 }
 pub mod string;
 pub mod var_int;
+pub mod var_long;
