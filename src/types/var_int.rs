@@ -27,8 +27,7 @@ impl McWrite for VarInt {
     }
 }
 impl McRead for VarInt {
-    type Error = String;
-    async fn read_stream<T: AsyncRead + Unpin>(b: &mut T) -> Result<Self, Self::Error> {
+    async fn read_stream<T: AsyncRead + Unpin>(b: &mut T) -> Result<Self, String> {
         let value = read_stream(b, 32).await? as i32;
         Ok(Self(value))
     }
@@ -81,14 +80,13 @@ async fn write_varint<W: AsyncWrite + Unpin>(
     loop {
         written += 1;
         if (value & !SEGMENT_BITS) == 0 {
-            writer.write_u8(value as u8).await.unwrap();
+            writer.write_u8(value as u8).await?;
             break;
         }
 
         writer
             .write_u8(((value & SEGMENT_BITS) | CONTINUE_BIT) as u8)
-            .await
-            .unwrap();
+            .await?;
 
         value = (value as u32 >> 7) as i32; // Simulate Java's >>>
     }

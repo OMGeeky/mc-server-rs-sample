@@ -1,8 +1,7 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub(crate) trait McRead {
-    type Error;
-    async fn read_stream<T: AsyncRead + Unpin>(stream: &mut T) -> Result<Self, Self::Error>
+    async fn read_stream<T: AsyncRead + Unpin>(stream: &mut T) -> Result<Self, String>
     where
         Self: Sized;
 }
@@ -21,6 +20,8 @@ pub trait McRustRepr {
     fn to_rs(&self) -> Self::RustRepresentation;
     fn as_rs(&self) -> &Self::RustRepresentation;
 }
+pub mod long;
+pub mod package;
 pub mod string;
 pub mod var_int;
 pub mod var_long;

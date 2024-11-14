@@ -34,8 +34,7 @@ impl McWrite for VarLong {
     }
 }
 impl McRead for VarLong {
-    type Error = String;
-    async fn read_stream<T: AsyncRead + Unpin>(b: &mut T) -> Result<Self, Self::Error> {
+    async fn read_stream<T: AsyncRead + Unpin>(b: &mut T) -> Result<Self, String> {
         let value = crate::types::var_int::read_stream(b, 64).await? as i64;
         Ok(Self(value))
     }

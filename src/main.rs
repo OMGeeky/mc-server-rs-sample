@@ -58,6 +58,10 @@ impl Connection {
                         self.connection_state = ConnectionState::Closed;
                         continue;
                     }
+                    // else if size == 0xFE {
+                    //   //  Legacy Ping (see https://wiki.vg/Server_List_Ping#1.6)
+                    // handle_legacy_ping(&mut self.tcp_stream).await?;
+                    // }
                 }
                 Err(_) => {
                     println!("could not peek if we reached the end of the stream.");
@@ -65,6 +69,16 @@ impl Connection {
             }
 
             let length = VarInt::read_stream(&mut self.tcp_stream).await?;
+            if *length == 0xFE {
+                //Legacy Ping (see https://wiki.vg/Server_List_Ping#1.6)
+                let x = handle_legacy_ping(&mut self.tcp_stream).await;
+                self.connection_state = ConnectionState::Closed;
+                self.tcp_stream.shutdown().await.map_err(|e| {
+                    dbg!(e);
+                    "?"
+                })?;
+                continue;
+            }
             println!("packet length: {}", length.as_rs());
             let bytes_left_in_package = length.to_rs();
 
@@ -102,24 +116,26 @@ impl Connection {
         _compression: bool,
         // bytes_left_in_package: &mut i32,
     ) -> Result<ConnectionState, String> {
-        println!("Handshake");
-        let protocol_version = VarInt::read_stream(stream).await?;
-        println!("protocol version: {}", protocol_version.as_rs());
-        let address: McString<255> = McString::read_stream(stream)
-            .await
-            .map_err(|_| "Could not read string".to_string())?;
-        println!("address: '{}'", address.as_rs());
-        stream.discard(2).await.unwrap(); //server port. Unused
-        let next_state_id = VarInt::read_stream(stream).await?;
-        println!("next state: {}", next_state_id.as_rs());
-        let next_state = FromPrimitive::from_i32(next_state_id.to_rs());
-        match next_state {
-            Some(next_state) => Ok(next_state),
-            None => Err(format!(
-                "Got an unknown next state: {}",
-                next_state_id.as_rs()
-            )),
-        }
+        let handshake_data = protocols::handshake::Data::read_stream(stream).await?;
+        // dbg!(&handshake_data);
+        Ok(handshake_data.next_state)
+        // let protocol_version = VarInt::read_stream(stream).await?;
+        // println!("protocol version: {}", protocol_version.as_rs());
+        // let address: McString<255> = McString::read_stream(stream)
+        //     .await
+        //     .map_err(|_| "Could not read string".to_string())?;
+        // println!("address: '{}'", address.as_rs());
+        // stream.discard(2).await.unwrap(); //server port. Unused
+        // let next_state_id = VarInt::read_stream(stream).await?;
+        // println!("next state: {}", next_state_id.as_rs());
+        // let next_state = FromPrimitive::from_i32(next_state_id.to_rs());
+        // match next_state {
+        //     Some(next_state) => Ok(next_state),
+        //     None => Err(format!(
+        //         "Got an unknown next state: {}",
+        //         next_state_id.as_rs()
+        //     )),
+        // }
     }
     async fn handle_package<T: AsyncRead + AsyncWrite + Unpin>(
         stream: &mut RWStreamWithLimit<'_, T>,
@@ -128,13 +144,17 @@ impl Connection {
     ) -> Result<ConnectionState, String> {
         let packet_id = VarInt::read_stream(stream).await?;
 
-        println!("id: {:0>2x}", packet_id.as_rs());
+        println!(
+            "Handling new Package with id: {:0>2x} =======================",
+            packet_id.as_rs()
+        );
         if connection_state == ConnectionState::NotConnected && packet_id.to_rs() == 0x00 {
             return Self::handshake(stream, compression).await;
         }
         match FromPrimitive::from_i32(packet_id.to_rs()) {
             Some(protocol) => {
-                let res = protocols::handle(protocol, stream).await;
+                let res = types::package::Package::handle(protocol, stream).await;
+                // let res = protocols::handle(protocol, stream).await;
                 match res {
                     Ok(_) => {
                         println!("Success!");
@@ -159,6 +179,35 @@ impl Connection {
         Ok(connection_state)
     }
 }
+
+async fn handle_legacy_ping(stream: &mut TcpStream) -> Result<(), String> {
+    println!("handling legacy ping");
+    let id = stream.read_u8().await.map_err(|e| e.to_string())?;
+    let payload = stream.read_u8().await.map_err(|e| e.to_string())?;
+    let plugin_message_ident = stream.read_u8().await.map_err(|e| e.to_string())?;
+
+    stream
+        .write_all(&[
+            0xfe, // 1st packet id: 0xfe for server list ping
+            0x01, // payload: always 1
+            0xfa, // 2nd packet id: 0xfa for plugin message
+            0x00, 0x0b, // length of following string: always 11 as short,
+            0x00, 0x4d, 0x00, 0x43, 0x00, 0x7c, 0x00, 0x50, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x67,
+            0x00, 0x48, 0x00, 0x6f, 0x00, 0x73, 0x00, 0x74,
+            // ^^ MC|PingHost as UTF16-BE
+
+            // length of the rest of the data
+            13, // ^^
+            // protocol version: 127 for the invalid version, to signal, client is too old
+            0, 49, 0, 50, 0, 55, // ^^
+            0x00, 0x00, // length of hostname: 0 as short
+            0x00, 0x00, 0x00, 0x00, // port: 0 as int
+        ])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 async fn handle_connection(stream: TcpStream) {
     let mut connection = Connection {
         connection_state: ConnectionState::NotConnected,
