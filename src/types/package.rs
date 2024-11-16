@@ -1,8 +1,12 @@
-use crate::protocols::{self, ProtocolId, ProtocolResponseId};
+use crate::protocols::{
+    self, LoginProtocolIds, NotConnectedProtocolIds, ProtocolId, ProtocolResponseId,
+    StatusProtocolIds,
+};
 use crate::types::string::McString;
 use crate::types::var_int::VarInt;
 use crate::types::{McRead, McWrite};
 use crate::utils::RWStreamWithLimit;
+use crate::ConnectionState;
 use num_traits::ToPrimitive;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 
@@ -26,15 +30,19 @@ impl OutgoingPackage {
 }
 #[derive(Debug, Clone)]
 pub enum IncomingPackageContent {
-    Handshake(crate::protocols::handshake::Data),
-    Status(crate::protocols::status::Data),
-    Ping(crate::protocols::ping::Data),
-    CustomReportDetails(crate::protocols::custom_report_details::Data),
+    Handshake(protocols::handshake::Data),
+    Status(protocols::status::Data),
+    Ping(protocols::ping::Data),
+    CustomReportDetails(protocols::custom_report_details::Data),
+    LoginStart(),
+    EncryptionResponse(),
+    LoginPluginResponse(),
+    CookieResponse(),
 }
 #[derive(Debug, Clone)]
 pub enum OutgoingPackageContent {
-    StatusResponse(crate::protocols::status::ResponseData),
-    PingResponse(crate::protocols::ping::ResponseData),
+    StatusResponse(protocols::status::ResponseData),
+    PingResponse(protocols::ping::ResponseData),
 }
 impl McWrite for OutgoingPackageContent {
     type Error = String;
@@ -104,22 +112,45 @@ impl IncomingPackage {
     async fn answer<T: AsyncRead + AsyncWrite + Unpin>(
         &self,
         stream: &mut RWStreamWithLimit<'_, T>,
-    ) -> Result<(), bool> {
-        let answer = match (&self.protocol, &self.content) {
-            (ProtocolId::Status, _) => Some(OutgoingPackage {
-                protocol: ProtocolResponseId::Status,
-                content: OutgoingPackageContent::StatusResponse(
-                    protocols::status::ResponseData::default(),
+    ) -> Result<Option<ConnectionState>, bool> {
+        let (answer, changed_connection_state) = match self.protocol {
+            ProtocolId::NotConnected(protocol_id) => match &self.content {
+                (IncomingPackageContent::Handshake(handshake_data)) => {
+                    (None, Some(handshake_data.next_state))
+                }
+                _ => (None, None), //Ignore all packets that do not belong here
+            },
+            ProtocolId::Status(protocol_id) => match &self.content {
+                IncomingPackageContent::Status(_) => (
+                    Some(OutgoingPackage {
+                        protocol: ProtocolResponseId::Status,
+                        content: OutgoingPackageContent::StatusResponse(
+                            protocols::status::ResponseData::default(),
+                        ),
+                    }),
+                    None,
                 ),
-            }),
-            (ProtocolId::Ping, IncomingPackageContent::Ping(ping_data)) => Some(OutgoingPackage {
-                protocol: ProtocolResponseId::Ping,
-                content: OutgoingPackageContent::PingResponse(protocols::ping::ResponseData {
-                    timespan: ping_data.timespan,
-                }),
-            }),
-            (ProtocolId::Ping, _) => unreachable!(),
-            (ProtocolId::CustomReportDetails, _) => None,
+                (IncomingPackageContent::Ping(ping_data)) => (
+                    Some(OutgoingPackage {
+                        protocol: ProtocolResponseId::Ping,
+                        content: OutgoingPackageContent::PingResponse(
+                            protocols::ping::ResponseData {
+                                timespan: ping_data.timespan,
+                            },
+                        ),
+                    }),
+                    None,
+                ),
+                _ => (None, None), //Ignore all packets that do not belong here
+            },
+
+            // ProtocolId::Login(protocol_id) => match (protocol_id, &self.content) {
+            //     (LoginProtocolIds::LoginStart, _) => (None, None),
+            //     (LoginProtocolIds::EncryptionResponse, _) => (None, None),
+            //     (LoginProtocolIds::LoginPluginResponse, _) => (None, None),
+            //     (LoginProtocolIds::CookieResponse, _) => (None, None),
+            // },
+            _ => (None, None), //TODO: implement the other ProtocolId variants (based on current ConnectionState)
         };
         if let Some(outgoing_package) = answer {
             outgoing_package.write_stream(stream).await.map_err(|e| {
@@ -127,14 +158,14 @@ impl IncomingPackage {
                 false
             })?;
         }
-        Ok(())
+        Ok(changed_connection_state)
     }
 }
 impl Package {
-    pub async fn handle<T: AsyncRead + AsyncWrite + Unpin>(
+    pub(crate) async fn handle<T: AsyncRead + AsyncWrite + Unpin>(
         protocol_id: ProtocolId,
         stream: &mut RWStreamWithLimit<'_, T>,
-    ) -> Result<(), bool> {
+    ) -> Result<Option<ConnectionState>, bool> {
         let incoming_content = read_data(protocol_id, stream).await.map_err(|e| {
             dbg!(e);
             true
@@ -143,8 +174,7 @@ impl Package {
             protocol: protocol_id,
             content: incoming_content,
         };
-        incoming.answer(stream).await?;
-        Ok(())
+        incoming.answer(stream).await
     }
 }
 
@@ -153,22 +183,39 @@ pub async fn read_data<T: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut RWStreamWithLimit<'_, T>,
 ) -> Result<IncomingPackageContent, String> {
     Ok(match protocol_id {
-        ProtocolId::Status => {
-            IncomingPackageContent::Status(protocols::status::Data::read_stream(stream).await?)
-        }
-        ProtocolId::Ping => {
-            IncomingPackageContent::Ping(protocols::ping::Data::read_stream(stream).await?)
-        }
-        ProtocolId::CustomReportDetails => {
-            // return Err("Not implemented".to_string());
-            let x = IncomingPackageContent::CustomReportDetails(
-                protocols::custom_report_details::Data::read_stream(stream).await?,
-            );
-            stream.discard_unread().await.map_err(|e| {
-                dbg!(e);
-                "Could not discard unused stuff"
-            })?;
-            x
-        }
+        ProtocolId::NotConnected(protocol_id) => match protocol_id {
+            NotConnectedProtocolIds::Handshake => IncomingPackageContent::Handshake(
+                protocols::handshake::Data::read_stream(stream).await?,
+            ),
+        },
+        ProtocolId::Status(protocol_id) => match protocol_id {
+            StatusProtocolIds::Status => {
+                IncomingPackageContent::Status(protocols::status::Data::read_stream(stream).await?)
+            }
+            StatusProtocolIds::Ping => {
+                IncomingPackageContent::Ping(protocols::ping::Data::read_stream(stream).await?)
+            }
+        },
+        ProtocolId::Login(protocol_id) => match protocol_id {
+            LoginProtocolIds::LoginStart => {
+                stream.discard_unread().await.map_err(|e| e.to_string())?;
+                IncomingPackageContent::LoginStart()
+            }
+            LoginProtocolIds::EncryptionResponse => {
+                stream.discard_unread().await.map_err(|e| e.to_string())?;
+                IncomingPackageContent::EncryptionResponse()
+            }
+            LoginProtocolIds::LoginPluginResponse => {
+                stream.discard_unread().await.map_err(|e| e.to_string())?;
+                IncomingPackageContent::LoginPluginResponse()
+            }
+            LoginProtocolIds::CookieResponse => {
+                stream.discard_unread().await.map_err(|e| e.to_string())?;
+                IncomingPackageContent::CookieResponse()
+            }
+        },
+        ProtocolId::Transfer(protocol_id) => match protocol_id {},
+        ProtocolId::Configuration(protocol_id) => match protocol_id {},
+        ProtocolId::Play(protocol_id) => match protocol_id {},
     })
 }
