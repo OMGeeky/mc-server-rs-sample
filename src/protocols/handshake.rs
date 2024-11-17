@@ -15,6 +15,8 @@ pub struct Data {
     server_port: u16,
     pub(crate) next_state: ConnectionState,
 }
+impl crate::types::package::ProtocolDataMarker for Data {}
+
 impl McRead for Data {
     async fn read_stream<T: AsyncRead + Unpin>(b: &mut T) -> Result<Self, String> {
         println!("Reading Handshake");

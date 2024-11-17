@@ -1,5 +1,5 @@
 use crate::types::long::Long;
-use crate::types::package::{OutgoingPackage, OutgoingPackageContent, Package};
+use crate::types::package::{OutgoingPackage, OutgoingPackageContent, Package, ProtocolData};
 use crate::types::string::McString;
 use crate::types::var_int::VarInt;
 use crate::types::var_long::VarLong;
@@ -21,6 +21,7 @@ impl McRead for Data {
         Ok(Self {})
     }
 }
+impl crate::types::package::ProtocolDataMarker for Data {}
 
 #[derive(Debug, Clone)]
 pub struct ResponseData {

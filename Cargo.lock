@@ -149,6 +149,7 @@ dependencies = [
 name = "mc-rust-server"
 version = "0.1.0"
 dependencies = [
+ "mc-rust-server-macros",
  "num-derive",
  "num-traits",
  "serde",
@@ -156,6 +157,15 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+]
+
+[[package]]
+name = "mc-rust-server-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+mc-rust-server-macros = { path = "mc-rust-server-macros" }
+
 num-derive = "0.4.2"
 num-traits = "0.2.19"
 tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros", "full", "net"] }

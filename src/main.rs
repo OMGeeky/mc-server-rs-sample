@@ -3,7 +3,7 @@ pub mod protocols;
 pub mod types;
 pub mod utils;
 
-use crate::protocols::ProtocolId;
+use crate::types::package::IncomingPackage;
 use crate::types::string::McString;
 use crate::types::var_int::VarInt;
 use crate::types::{McRead, McRustRepr};
@@ -118,36 +118,9 @@ impl Connection {
         connection_state: ConnectionState,
         compression: bool,
     ) -> Result<ConnectionState, String> {
-        let packet_id = VarInt::read_stream(stream).await?;
-
-        println!(
-            "Handling new Package with id: {:0>2x} =======================",
-            packet_id.as_rs()
-        );
-        match ProtocolId::from_id_and_state(packet_id.to_rs(), connection_state) {
-            Some(protocol) => {
-                let res = types::package::Package::handle(protocol, stream).await;
-                match res {
-                    Ok(connection_state_change) => {
-                        println!("Success!");
-                        if let Some(connection_state_change) = connection_state_change {
-                            return Ok(connection_state_change);
-                        }
-                    }
-                    Err(terminate_connection) => {
-                        if terminate_connection {
-                            return Err("Something terrible has happened!".to_string());
-                        } else {
-                            stream.discard_unread().await.map_err(|x| x.to_string())?;
-                        }
-                        println!("Failure :(");
-                    }
-                }
-            }
-            None => {
-                stream.discard_unread().await.map_err(|x| x.to_string())?;
-                println!("I don't know this protocol yet, so Im gonna ignore it...");
-            }
+        let res = IncomingPackage::handle_incoming(stream, connection_state).await?;
+        if let Some(new_connection_state) = res {
+            return Ok(new_connection_state);
         }
         Ok(connection_state)
     }

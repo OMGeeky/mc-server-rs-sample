@@ -1,4 +1,5 @@
 use crate::types::long::Long;
+use crate::types::package::ProtocolData;
 use crate::types::string::McString;
 use crate::types::var_int::VarInt;
 use crate::types::var_long::VarLong;
@@ -23,6 +24,7 @@ impl McRead for Data {
     }
 }
 
+impl crate::types::package::ProtocolDataMarker for Data {}
 #[derive(Debug, Clone)]
 pub struct ResponseData {
     pub(crate) timespan: Long,

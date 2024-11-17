@@ -11,6 +11,8 @@ pub struct Protocol {}
 pub struct Data {
     details: Vec<(McString<128>, McString<4096>)>,
 }
+impl crate::types::package::ProtocolDataMarker for Data {}
+
 impl McRead for Data {
     async fn read_stream<T: AsyncRead + Unpin>(stream: &mut T) -> Result<Self, String>
     where

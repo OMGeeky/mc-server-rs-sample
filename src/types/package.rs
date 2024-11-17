@@ -1,12 +1,10 @@
-use crate::protocols::{
-    self, LoginProtocolIds, NotConnectedProtocolIds, ProtocolId, ProtocolResponseId,
-    StatusProtocolIds,
-};
+use crate::protocols::{self, NotImplementedData, ProtocolResponseId};
 use crate::types::string::McString;
 use crate::types::var_int::VarInt;
-use crate::types::{McRead, McWrite};
+use crate::types::{McRead, McRustRepr, McWrite};
 use crate::utils::RWStreamWithLimit;
-use crate::ConnectionState;
+use crate::{types, ConnectionState};
+use mc_rust_server_macros::McProtocol;
 use num_traits::ToPrimitive;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 
@@ -17,7 +15,6 @@ pub enum Package {
 }
 #[derive(Debug, Clone)]
 pub struct IncomingPackage {
-    pub(crate) protocol: ProtocolId,
     pub(crate) content: IncomingPackageContent,
 }
 #[derive(Debug, Clone)]
@@ -25,19 +22,24 @@ pub struct OutgoingPackage {
     pub(crate) protocol: ProtocolResponseId,
     pub(crate) content: OutgoingPackageContent,
 }
-impl OutgoingPackage {
-    pub fn empty() {}
-}
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, McProtocol)]
 pub enum IncomingPackageContent {
+    #[protocol_read(ConnectionState::NotConnected, 0x00)]
     Handshake(protocols::handshake::Data),
+    #[protocol_read(ConnectionState::Status, 0x00)]
     Status(protocols::status::Data),
+    #[protocol_read(ConnectionState::Status, 0x01)]
     Ping(protocols::ping::Data),
+    #[protocol_read(ConnectionState::Play, 0x7a)]
     CustomReportDetails(protocols::custom_report_details::Data),
-    LoginStart(),
-    EncryptionResponse(),
-    LoginPluginResponse(),
-    CookieResponse(),
+    #[protocol_read(ConnectionState::Login, 0x00)]
+    LoginStart(NotImplementedData),
+    #[protocol_read(ConnectionState::Login, 0x01)]
+    EncryptionResponse(NotImplementedData),
+    #[protocol_read(ConnectionState::Login, 0x02)]
+    LoginPluginResponse(NotImplementedData),
+    #[protocol_read(ConnectionState::Login, 0x03)]
+    CookieResponse(NotImplementedData),
 }
 #[derive(Debug, Clone)]
 pub enum OutgoingPackageContent {
@@ -109,48 +111,76 @@ impl McWrite for OutgoingPackage {
     }
 }
 impl IncomingPackage {
+    pub(crate) async fn handle_incoming<T: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut RWStreamWithLimit<'_, T>,
+        connection_state: ConnectionState,
+    ) -> Result<Option<ConnectionState>, String> {
+        let packet_id = VarInt::read_stream(stream)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        println!(
+            "Handling new Package with id: {:0>2x} =======================",
+            packet_id.as_rs()
+        );
+
+        let incoming_content =
+            IncomingPackageContent::read_protocol_data(packet_id, connection_state, stream).await;
+
+        let incoming = IncomingPackage {
+            content: match incoming_content {
+                Ok(incoming) => incoming,
+                Err(e) => {
+                    stream.discard_unread().await.map_err(|x| x.to_string())?;
+                    return Err(e);
+                }
+            },
+        };
+        let res = incoming.answer(stream).await;
+        match res {
+            Ok(connection_state_change) => {
+                println!("Success!");
+                return Ok(connection_state_change);
+            }
+            Err(terminate_connection) => {
+                if terminate_connection {
+                    return Err("Something terrible has happened!".to_string());
+                } else {
+                    stream.discard_unread().await.map_err(|x| x.to_string())?;
+                }
+                println!("Failure :(");
+            }
+        }
+
+        Ok(None)
+    }
     async fn answer<T: AsyncRead + AsyncWrite + Unpin>(
         &self,
         stream: &mut RWStreamWithLimit<'_, T>,
     ) -> Result<Option<ConnectionState>, bool> {
-        let (answer, changed_connection_state) = match self.protocol {
-            ProtocolId::NotConnected(protocol_id) => match &self.content {
-                (IncomingPackageContent::Handshake(handshake_data)) => {
-                    (None, Some(handshake_data.next_state))
-                }
-                _ => (None, None), //Ignore all packets that do not belong here
-            },
-            ProtocolId::Status(protocol_id) => match &self.content {
-                IncomingPackageContent::Status(_) => (
-                    Some(OutgoingPackage {
-                        protocol: ProtocolResponseId::Status,
-                        content: OutgoingPackageContent::StatusResponse(
-                            protocols::status::ResponseData::default(),
-                        ),
+        let (answer, changed_connection_state) = match &self.content {
+            (IncomingPackageContent::Handshake(handshake_data)) => {
+                (None, Some(handshake_data.next_state))
+            }
+            IncomingPackageContent::Status(_) => (
+                Some(OutgoingPackage {
+                    protocol: ProtocolResponseId::Status,
+                    content: OutgoingPackageContent::StatusResponse(
+                        protocols::status::ResponseData::default(),
+                    ),
+                }),
+                None,
+            ),
+            (IncomingPackageContent::Ping(ping_data)) => (
+                Some(OutgoingPackage {
+                    protocol: ProtocolResponseId::Ping,
+                    content: OutgoingPackageContent::PingResponse(protocols::ping::ResponseData {
+                        timespan: ping_data.timespan,
                     }),
-                    None,
-                ),
-                (IncomingPackageContent::Ping(ping_data)) => (
-                    Some(OutgoingPackage {
-                        protocol: ProtocolResponseId::Ping,
-                        content: OutgoingPackageContent::PingResponse(
-                            protocols::ping::ResponseData {
-                                timespan: ping_data.timespan,
-                            },
-                        ),
-                    }),
-                    None,
-                ),
-                _ => (None, None), //Ignore all packets that do not belong here
-            },
-
-            // ProtocolId::Login(protocol_id) => match (protocol_id, &self.content) {
-            //     (LoginProtocolIds::LoginStart, _) => (None, None),
-            //     (LoginProtocolIds::EncryptionResponse, _) => (None, None),
-            //     (LoginProtocolIds::LoginPluginResponse, _) => (None, None),
-            //     (LoginProtocolIds::CookieResponse, _) => (None, None),
-            // },
-            _ => (None, None), //TODO: implement the other ProtocolId variants (based on current ConnectionState)
+                }),
+                None,
+            ),
+            _ => (None, None), //TODO: implement the other IncomingPackageContent variants
         };
         if let Some(outgoing_package) = answer {
             outgoing_package.write_stream(stream).await.map_err(|e| {
@@ -161,61 +191,27 @@ impl IncomingPackage {
         Ok(changed_connection_state)
     }
 }
-impl Package {
-    pub(crate) async fn handle<T: AsyncRead + AsyncWrite + Unpin>(
-        protocol_id: ProtocolId,
-        stream: &mut RWStreamWithLimit<'_, T>,
-    ) -> Result<Option<ConnectionState>, bool> {
-        let incoming_content = read_data(protocol_id, stream).await.map_err(|e| {
-            dbg!(e);
-            true
-        })?;
-        let incoming = IncomingPackage {
-            protocol: protocol_id,
-            content: incoming_content,
-        };
-        incoming.answer(stream).await
+
+pub(crate) trait ProtocolDataMarker {}
+pub(crate) trait ProtocolData {
+    async fn read_data<T: AsyncRead + Unpin>(stream: &mut T) -> Result<Self, String>
+    where
+        Self: Sized;
+}
+impl<T> ProtocolData for T
+where
+    T: ProtocolDataMarker + McRead,
+{
+    async fn read_data<Stream: AsyncRead + Unpin>(stream: &mut Stream) -> Result<Self, String>
+    where
+        Self: Sized,
+    {
+        Self::read_stream(stream).await
     }
 }
-
-pub async fn read_data<T: AsyncRead + AsyncWrite + Unpin>(
-    protocol_id: ProtocolId,
-    stream: &mut RWStreamWithLimit<'_, T>,
-) -> Result<IncomingPackageContent, String> {
-    Ok(match protocol_id {
-        ProtocolId::NotConnected(protocol_id) => match protocol_id {
-            NotConnectedProtocolIds::Handshake => IncomingPackageContent::Handshake(
-                protocols::handshake::Data::read_stream(stream).await?,
-            ),
-        },
-        ProtocolId::Status(protocol_id) => match protocol_id {
-            StatusProtocolIds::Status => {
-                IncomingPackageContent::Status(protocols::status::Data::read_stream(stream).await?)
-            }
-            StatusProtocolIds::Ping => {
-                IncomingPackageContent::Ping(protocols::ping::Data::read_stream(stream).await?)
-            }
-        },
-        ProtocolId::Login(protocol_id) => match protocol_id {
-            LoginProtocolIds::LoginStart => {
-                stream.discard_unread().await.map_err(|e| e.to_string())?;
-                IncomingPackageContent::LoginStart()
-            }
-            LoginProtocolIds::EncryptionResponse => {
-                stream.discard_unread().await.map_err(|e| e.to_string())?;
-                IncomingPackageContent::EncryptionResponse()
-            }
-            LoginProtocolIds::LoginPluginResponse => {
-                stream.discard_unread().await.map_err(|e| e.to_string())?;
-                IncomingPackageContent::LoginPluginResponse()
-            }
-            LoginProtocolIds::CookieResponse => {
-                stream.discard_unread().await.map_err(|e| e.to_string())?;
-                IncomingPackageContent::CookieResponse()
-            }
-        },
-        ProtocolId::Transfer(protocol_id) => match protocol_id {},
-        ProtocolId::Configuration(protocol_id) => match protocol_id {},
-        ProtocolId::Play(protocol_id) => match protocol_id {},
-    })
+async fn read_protocol_data<S, T: AsyncRead + Unpin>(stream: &mut T) -> Result<S, String>
+where
+    S: Sized + ProtocolData,
+{
+    S::read_data::<T>(stream).await
 }
